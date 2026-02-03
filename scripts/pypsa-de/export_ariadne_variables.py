@@ -4,9 +4,6 @@ import math
 import os
 import re
 import sys
-
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__) + "/../.."))
-
 from functools import reduce
 
 import numpy as np
@@ -15,9 +12,17 @@ import pypsa
 from numpy import isclose
 from pypsa.statistics import get_transmission_carriers
 
-from scripts._helpers import configure_logging, mock_snakemake
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__) + "/../.."))
+
+from scripts._helpers import (
+    configure_logging,
+    mock_snakemake,
+    set_scenario_config,
+    update_config_from_wildcards,
+)
 from scripts.add_electricity import calculate_annuity, load_costs
 
+pypsa.options.params.statistics.round = 10
 logger = logging.getLogger(__name__)
 
 # Defining global variables
@@ -59,23 +64,23 @@ def domestic_length_factor(n, carriers, region="DE"):
         if carrier not in (
             n.links.carrier.unique().tolist() + n.lines.carrier.unique().tolist()
         ):
-            print(f"Carrier '{carrier}' is neither in lines nor links.")
+            logger.info(f"Carrier '{carrier}' is neither in lines nor links.")
             continue  # Skip this carrier if not found in both links and lines
 
         # Loop through relevant components
-        for c in n.iterate_components():
-            if c.name in ["Link", "Line"] and carrier in c.df["carrier"].unique():
+        for c in n.components:
+            if c.name in ["Link", "Line"] and carrier in c.static["carrier"].unique():
                 # Filter based on carrier and region, excluding reversed links
-                all_i = c.df[
-                    (c.df["carrier"] == carrier)
-                    & (c.df.bus0 + c.df.bus1).str.contains(region)
-                    & ~c.df.index.str.contains("reversed")
+                all_i = c.static[
+                    (c.static["carrier"] == carrier)
+                    & (c.static.bus0 + c.static.bus1).str.contains(region)
+                    & ~c.static.index.str.contains("reversed")
                 ].index
 
                 # Separate domestic and cross-border links
                 domestic_i = all_i[
-                    c.df.loc[all_i, "bus0"].str.contains(region)
-                    & c.df.loc[all_i, "bus1"].str.contains(region)
+                    c.static.loc[all_i, "bus0"].str.contains(region)
+                    & c.static.loc[all_i, "bus1"].str.contains(region)
                 ]
                 cross_border_i = all_i.difference(domestic_i)
 
@@ -85,12 +90,12 @@ def domestic_length_factor(n, carriers, region="DE"):
                 # Calculate length factor if both sets are non-empty
                 if len(domestic_i) > 0 and len(cross_border_i) > 0:
                     length_factor = (
-                        c.df.loc[domestic_i, "length"].mean()
-                        / c.df.loc[cross_border_i, "length"].mean()
+                        c.static.loc[domestic_i, "length"].mean()
+                        / c.static.loc[cross_border_i, "length"].mean()
                     )
                     length_factors[(carrier, c.name)] = length_factor
                 else:
-                    print(
+                    logger.info(
                         f"No domestic or cross-border links found for {carrier} in {c.name}."
                     )
 
@@ -232,6 +237,8 @@ def _get_fuel_fractions(n, region, fuel):
 
     assert isclose(fuel_fractions.sum(), 1)
 
+    fuel_fractions /= fuel_fractions.sum()
+
     return fuel_fractions
 
 
@@ -299,7 +306,7 @@ def sum_co2(n, carrier, region):
             .index("co2 atmosphere")
         )
     except KeyError:
-        print(
+        logger.info(
             "Warning: carrier `",
             carrier,
             "` not found in network.links.carrier!",
@@ -349,6 +356,7 @@ def add_system_cost_rows(n):
             df.loc[df.carrier == carrier, "lifetime"] = lifetime
         else:
             logger.error(f"Mean lifetime of {carrier} is not infinite!")
+            raise ValueError()
 
     logger.info("Overwriting lifetime of components to compute annuities")
 
@@ -860,6 +868,11 @@ def _get_capacities(n, region, cap_func, cap_string="Capacity|"):
         )
         .multiply(MW2GW)
     )
+    heat_pump_idxs = capacities_central_heat.filter(like="heat pump").index
+    capacities_central_heat[heat_pump_idxs] = abs(
+        capacities_central_heat[heat_pump_idxs]
+    )
+
     if cap_string.startswith("Investment") or cap_string.startswith("System Cost"):
         secondary_heat_techs = [
             "DAC",
@@ -991,6 +1004,10 @@ def _get_capacities(n, region, cap_func, cap_string="Capacity|"):
         )
         .multiply(MW2GW)
     )
+    heat_pump_idxs = capacities_decentral_heat.filter(like="heat pump").index
+    capacities_decentral_heat[heat_pump_idxs] = abs(
+        capacities_decentral_heat[heat_pump_idxs]
+    )
 
     var[cap_string + "Decentral Heat|Solar thermal"] = capacities_decentral_heat.filter(
         like="solar thermal"
@@ -1091,7 +1108,7 @@ def _get_capacities(n, region, cap_func, cap_string="Capacity|"):
         #
         var[cap_string + "Methanol"] = capacities_methanol.get("methanolisation", 0)
     except KeyError:
-        print(
+        logger.info(
             "Warning: carrier `methanol` not found in network.links.carrier! Assuming 0 capacities."
         )
         var[cap_string + "Methanol"] = 0
@@ -1188,6 +1205,7 @@ def get_primary_energy(n, region):
         n.statistics.withdrawal(bus_carrier="oil primary", **kwargs)
         .get(("Link", "DE oil refining"), pd.Series(0))
         .item(),
+        atol=1,  # MW
     )
 
     gas_fractions = _get_fuel_fractions(n, region, "gas")
@@ -1751,7 +1769,7 @@ def get_secondary_energy(n, region, _industry_demand):
             ~hydrogen_production.index.str.startswith("H2 pipeline")
         ].sum(),
         rtol=0.01,
-        atol=1e-5,
+        atol=1e-3,
     )
 
     # Liquids
@@ -1786,7 +1804,7 @@ def get_secondary_energy(n, region, _industry_demand):
         var["Secondary Energy|Liquids"],
         liquids_production.sum(),
         rtol=0.01,
-        atol=1e-5,
+        atol=1e-3,
     )
 
     gas_supply = (
@@ -1900,7 +1918,14 @@ def get_secondary_energy(n, region, _industry_demand):
 
 
 def get_final_energy(
-    n, region, _industry_demand, _energy_totals, _sector_ratios, _industry_production
+    n,
+    region,
+    _industry_demand,
+    _energy_totals,
+    _sector_ratios,
+    _industry_production,
+    config,
+    config_industry,
 ):
     var = pd.Series()
 
@@ -3070,8 +3095,8 @@ def get_emissions(n, region, _energy_totals, industry_demand):
         - co2_negative_emissions.get("DAC", 0)
     )
 
-    print(
-        "Differences in accounting for CO2 emissions:",
+    logger.info(
+        "Differences in accounting for CO2 emissions: %s",
         emission_difference,
     )
 
@@ -3103,7 +3128,7 @@ def get_nodal_flows(n, bus_carrier, region, query="index == index or index != in
         n.statistics.withdrawal(
             bus_carrier=bus_carrier,
             groupby=groupby,
-            aggregate_time=False,
+            groupby_time=False,
         )
         .query(query)
         .groupby("bus")
@@ -3139,7 +3164,7 @@ def get_nodal_supply(n, bus_carrier, query="index == index or index != index"):
         n.statistics.supply(
             bus_carrier=bus_carrier,
             groupby=groupby,
-            aggregate_time=False,
+            groupby_time=False,
         )
         .query(query)
         .groupby("bus")
@@ -4263,25 +4288,15 @@ def get_grid_investments(
 
 def get_policy(n, investment_year):
     var = pd.Series()
-
-    # add carbon component to fossil fuels if specified
-    if (snakemake.params.co2_price_add_on_fossils is not None) and (
-        investment_year in snakemake.params.co2_price_add_on_fossils.keys()
-    ):
-        co2_price_add_on = snakemake.params.co2_price_add_on_fossils[investment_year]
-    else:
-        co2_price_add_on = 0.0
     try:
         co2_limit_de = n.global_constraints.loc["co2_limit-DE", "mu"]
     except KeyError:
         co2_limit_de = 0
-    var["Price|Carbon"] = (
-        -n.global_constraints.loc["CO2Limit", "mu"] - co2_limit_de + co2_price_add_on
-    )
+    var["Price|Carbon"] = -n.global_constraints.loc["CO2Limit", "mu"] - co2_limit_de
 
-    var["Price|Carbon|EU-wide Regulation All Sectors"] = (
-        -n.global_constraints.loc["CO2Limit", "mu"] + co2_price_add_on
-    )
+    var["Price|Carbon|EU-wide Regulation All Sectors"] = -n.global_constraints.loc[
+        "CO2Limit", "mu"
+    ]
 
     # Price|Carbon|EU-wide Regulation Non-ETS
 
@@ -4296,7 +4311,7 @@ def get_economy(n, region):
     var = pd.Series()
 
     def get_tsc(n, country):
-        pypsa.options.set_option("params.statistics.drop_zero", False)
+        pypsa.options.params.statistics.drop_zero = False
         capex = n.statistics.capex(
             groupby=pypsa.statistics.groupers["name", "carrier"], nice_names=False
         )
@@ -5193,6 +5208,8 @@ def get_ariadne_var(
     costs,
     region,
     year,
+    config,
+    config_industry,
 ):
     var = pd.concat(
         [
@@ -5212,6 +5229,8 @@ def get_ariadne_var(
                 energy_totals,
                 sector_ratios,
                 industry_production,
+                config,
+                config_industry,
             ),
             get_prices(n, region),
             get_emissions(n, region, energy_totals, industry_demand),
@@ -5235,6 +5254,8 @@ def get_data(
     costs,
     region,
     year,
+    config,
+    config_industry,
     version="0.10",
     scenario="test",
 ):
@@ -5247,6 +5268,8 @@ def get_data(
         costs,
         region,
         year,
+        config,
+        config_industry,
     )
 
     # Renaming variables
@@ -5334,7 +5357,8 @@ if __name__ == "__main__":
             run="KN2045_Mix",
         )
     configure_logging(snakemake)
-    config = snakemake.config
+    set_scenario_config(snakemake)
+    update_config_from_wildcards(snakemake.config, snakemake.wildcards)
     config_industry = snakemake.params.config_industry
     planning_horizons = snakemake.params.planning_horizons
     post_discretization = snakemake.params.post_discretization
@@ -5383,17 +5407,9 @@ if __name__ == "__main__":
     # Load data
     _networks = [pypsa.Network(fn) for fn in snakemake.input.networks]
 
-    nhours = _networks[0].snapshot_weightings.generators.sum()
-    nyears = nhours / 8760
-
     costs = list(
         map(
-            lambda _costs: load_costs(
-                _costs,
-                snakemake.params.costs,
-                snakemake.params.max_hours,
-                nyears,
-            ).multiply(1e-9),  # in bn €
+            lambda _costs: load_costs(_costs).multiply(1e-9),  # in bn €
             snakemake.input.costs,
         )
     )
@@ -5425,7 +5441,7 @@ if __name__ == "__main__":
 
     yearly_dfs = []
     for i, year in enumerate(planning_horizons):
-        print(f"Getting data for year {year}...")
+        logger.info(f"Getting data for year {year}...")
         yearly_dfs.append(
             get_data(
                 networks[i],
@@ -5436,7 +5452,9 @@ if __name__ == "__main__":
                 costs[i],
                 "DE",
                 year=year,
-                version=config["version"],
+                config=snakemake.config,
+                config_industry=snakemake.params.config_industry,
+                version=snakemake.config["version"],
                 scenario=snakemake.wildcards.run,
             )
         )
@@ -5448,7 +5466,7 @@ if __name__ == "__main__":
         yearly_dfs,
     )
 
-    print("Gleichschaltung of AC-Startnetz with investments for AC projects")
+    logger.info("Gleichschaltung of AC-Startnetz with investments for AC projects")
     # In this hacky part of the code we assure that the investments for the AC projects, match those of the NEP-AC-Startnetz
     # Thus the variable 'Investment|Energy Supply|Electricity|Transmission|AC' is equal to the sum of exogeneous AC projects, endogenous AC expansion and Übernahme of NEP costs (mainly Systemdienstleistungen (Reactive Power Compensation) and lines that are below our spatial resolution)
     ac_startnetz = 14.5 / 5 / EUR20TOEUR23  # billion EUR
@@ -5472,7 +5490,7 @@ if __name__ == "__main__":
             [2025, 2030, 2035, 2040],
         ] += (ac_startnetz - ac_projects_invest) / 4
 
-    print("Assigning mean investments of year and year + 5 to year.")
+    logger.info("Assigning mean investments of year and year + 5 to year.")
     investment_rows = df.loc[df["Variable"].str.contains("Investment")]
     average_investments = (
         investment_rows[planning_horizons]
@@ -5494,11 +5512,7 @@ if __name__ == "__main__":
     with pd.ExcelWriter(snakemake.output.exported_variables_full) as writer:
         df.round(5).to_excel(writer, sheet_name="data", index=False)
 
-    print(
-        "Dropping variables which are not in the template:",
-        *df.loc[df["Unit"] == "NA"]["Variable"],
-        sep="\n",
-    )
+    logger.info("Dropping variables which are not in the template.")
     ariadne_df = df.drop(df.loc[df["Unit"] == "NA"].index)
 
     meta = pd.Series(

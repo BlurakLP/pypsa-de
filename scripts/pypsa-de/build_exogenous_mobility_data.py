@@ -2,7 +2,12 @@ import logging
 
 import pandas as pd
 
-from scripts._helpers import configure_logging, mock_snakemake
+from scripts._helpers import (
+    configure_logging,
+    mock_snakemake,
+    set_scenario_config,
+    update_config_from_wildcards,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +17,7 @@ def get_mobility_data(
     year,
     non_land_liquids,
     ageb_for_mobility=True,
-    uba_for_mobility=False,
+    uba_for_mobility="",
 ):
     """
     Retrieve the German mobility demand from the transport model.
@@ -62,7 +67,7 @@ def get_mobility_data(
             # FZ27_202101, table FZ 27.2, 1. January 2021:
             mobility_data["million_EVs"] = 0.358498 + 0.280149
 
-    elif year == "2025" and uba_for_mobility:
+    elif year == "2025" and int(year) in uba_for_mobility:
         # https://www.umweltbundesamt.de/sites/default/files/medien/11850/publikationen/projektionsbericht_2025.pdf, Abbildung 64 & 59,
         mobility_data = pd.Series(
             {
@@ -77,7 +82,7 @@ def get_mobility_data(
         mobility_data = mobility_data.mul(1e6)  # convert TWh to MWh
         mobility_data["million_EVs"] = 2.7 + 1.2  # BEV + PHEV
 
-    elif year == "2030" and uba_for_mobility:
+    elif year == "2030" and int(year) in uba_for_mobility:
         mobility_data = pd.Series(
             {
                 "Electricity": 57.0,
@@ -89,7 +94,7 @@ def get_mobility_data(
         mobility_data = mobility_data.mul(1e6)
         mobility_data["million_EVs"] = 8.7 + 1.8
 
-    elif year == "2035" and uba_for_mobility:
+    elif year == "2035" and int(year) in uba_for_mobility:
         mobility_data = pd.Series(
             {
                 "Electricity": 117.0,
@@ -102,8 +107,11 @@ def get_mobility_data(
         mobility_data["million_EVs"] = 18.9 + 1.8
 
     else:
-        if uba_for_mobility:
+        if int(year) in uba_for_mobility:  # here year > 2035
             logger.error(
+                f"Year {year} is not supported for UBA mobility projections. Please use only 2020, 2025, 2030, 2035."
+            )
+            raise NotImplementedError(
                 f"Year {year} is not supported for UBA mobility projections. Please use only 2020, 2025, 2030, 2035."
             )
 
@@ -136,6 +144,8 @@ if __name__ == "__main__":
             run="KN2045_Mix",
         )
     configure_logging(snakemake)
+    set_scenario_config(snakemake)
+    update_config_from_wildcards(snakemake.config, snakemake.wildcards)
 
     db = pd.read_csv(
         snakemake.input.ariadne,

@@ -41,7 +41,7 @@ This will run all analysis steps to reproduce results. If computational resource
 ## Repo structure
 
 * `config`: configuration files
-* `ariadne-data`: Germany specific data from the Ariadne project
+* `data/pypsa-de`: Germany specific data from the Ariadne project
 * `scripts`: contains the Python scripts for the workflow, the Germany specific code needed to run this repo is contained in `scripts/pypsa-de`
 * `cutouts`: very large weather data cutouts supplied by atlite library (does not exist initially)
 * `data`: place for raw data (does not exist initially)
@@ -77,7 +77,7 @@ PyPSA-DE is a softfork of PyPSA-EUR. As such, large parts of the functionality a
 
 ## New Config Options
 
-- `iiasa_database` - interaction with IIASA database. Specify a database, and `leitmodelle` for demand and co2 emissions data in specific sectors
+- `pypsa-de` - interaction with IIASA database. Specify a database, and `leitmodelle` for demand and co2 emissions data in specific sectors
 - `wasserstoff_kernnetz` - configure which parts of the Wasserstoff Kernnetz should be included in the model
 - `new_decentral_fossil_boiler_ban` - specify in which country and which years to ban fossil boilers
 - `coal_generation_ban` - specify in which country and which years to ban electricity generation from coal
@@ -85,7 +85,16 @@ PyPSA-DE is a softfork of PyPSA-EUR. As such, large parts of the functionality a
 - `first_technology_occurrence` - specify the year form which on specific technologies are available
 - `solving:constraints` - specify PyPSA-DE specific limits, e.g. on capacity, trade and generation
 - `co2_budget_DE_source` specify the carbon trajectory for Germany: Following the projections of the Umweltbundestamt (`UBA`) or targeting net zero with the Klimaschutzgesetz(`KSG`)
-- `costs:NEP` and `costs:transmission` - specify which year of the Netzentwicklungsplan should be used as basis for the transmission line costs (`2021,2023`) and if new HVDC links should be built with `overhead` or `underground` cables
+- `costs:transmission` - specify  if new HVDC links should be built with `overhead` or `underground` cables. the basic cost assumptions of the Netzentwicklungsplan (`2021,2023`) can be changed by using one of the two corresponding `custom_cost_nep_*.csv` files provided in the `data/pypsa-de` folder
+
+## Data sources
+
+`data/pypsa-de/data/pypsa-debase.csv`
+
+* **Source:** Kopernikus Projekt Ariadne
+* **Link:** [Szenarien-Explorer](https://ariadne2.apps.ece.iiasa.ac.at/explorer)
+* **License:** CC-BY 4.0
+* **Description:** Results from the [Ariadne Report: Die Energiewende kosteneffizient gestalten](https://ariadneprojekt.de/publikation/report-szenarien-zur-klimaneutralitat-2045/)
 
 ## License
 
@@ -127,25 +136,34 @@ for installation instructions and other useful information about the snakemake w
 The model is designed to be imported into the open toolbox
 [PyPSA](https://github.com/PyPSA/PyPSA).
 
-**WARNING**: PyPSA-Eur is under active development and has several
-[limitations](https://pypsa-eur.readthedocs.io/en/latest/limitations.html) which
-you should understand before using the model. The github repository
-[issues](https://github.com/PyPSA/pypsa-eur/issues) collect known topics we are
-working on (please feel free to help or make suggestions). The
-[documentation](https://pypsa-eur.readthedocs.io/) remains somewhat patchy. You
-can find showcases of the model's capabilities in the Joule paper [The potential
-role of a hydrogen network in
-Europe](https://doi.org/10.1016/j.joule.2023.06.016), another [paper in Joule
-with a description of the industry
-sector](https://doi.org/10.1016/j.joule.2022.04.016), or in [a 2021 presentation
-at EMP-E](https://nworbmot.org/energy/brown-empe.pdf). We do not recommend to
-use the full resolution network model for simulations. At high granularity the
-assignment of loads and generators to the nearest network node may not be a
-correct assumption, depending on the topology of the underlying distribution
-grid, and local grid bottlenecks may cause unrealistic load-shedding or
-generator curtailment. We recommend to cluster the network to a couple of
-hundred nodes to remove these local inconsistencies. See the discussion in
-Section 3.4 "Model validation" of the paper.
+> [!NOTE]
+> PyPSA-Eur has many contributors, with the maintenance currently led by the [Department of Digital Transformation in
+> Energy Systems](https://tu.berlin/en/ensys) at the [Technical University of
+> Berlin](https://www.tu.berlin).
+> Previous versions were developed at the [Karlsruhe
+> Institute of Technology](http://www.kit.edu/english/index.php) funded by the
+> [Helmholtz Association](https://www.helmholtz.de/en/).
+
+> [!WARNING]
+> PyPSA-Eur is under active development and has several
+> [limitations](https://pypsa-eur.readthedocs.io/en/latest/limitations.html) which
+> you should understand before using the model. The github repository
+> [issues](https://github.com/PyPSA/pypsa-eur/issues) collect known topics we are
+> working on (please feel free to help or make suggestions). The
+> [documentation](https://pypsa-eur.readthedocs.io/) remains somewhat patchy. You
+> can find showcases of the model's capabilities in the Joule paper [The potential
+> role of a hydrogen network in
+> Europe](https://doi.org/10.1016/j.joule.2023.06.016), another [paper in Joule
+> with a description of the industry
+> sector](https://doi.org/10.1016/j.joule.2022.04.016), or in [a 2021 presentation
+> at EMP-E](https://nworbmot.org/energy/brown-empe.pdf). We do not recommend to
+> use the full resolution network model for simulations. At high granularity the
+> assignment of loads and generators to the nearest network node may not be a
+> correct assumption, depending on the topology of the underlying distribution
+> grid, and local grid bottlenecks may cause unrealistic load-shedding or
+> generator curtailment. We recommend to cluster the network to a couple of
+> hundred nodes to remove these local inconsistencies. See the discussion in
+> Section 3.4 "Model validation" of the paper.
 
 ![PyPSA-Eur Grid Model](doc/img/elec.png)
 

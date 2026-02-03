@@ -28,19 +28,21 @@ def add_capacity_limits(n, investment_year, limits_capacity, sense="maximum"):
                 )
 
                 valid_components = (
-                    (c.df.index.str[:2] == ct)
-                    & (c.df.carrier.str[: len(carrier)] == carrier)
-                    & ~c.df.carrier.str.contains("thermal")
+                    (c.static.index.str[:2] == ct)
+                    & (c.static.carrier.str[: len(carrier)] == carrier)
+                    & ~c.static.carrier.str.contains("thermal")
                 )  # exclude solar thermal
 
-                existing_index = c.df.index[
-                    valid_components & ~c.df[attr + "_nom_extendable"]
+                existing_index = c.static.index[
+                    valid_components & ~c.static[attr + "_nom_extendable"]
                 ]
-                extendable_index = c.df.index[
-                    valid_components & c.df[attr + "_nom_extendable"]
+                extendable_index = c.static.index[
+                    valid_components
+                    & c.static[attr + "_nom_extendable"]
+                    & c.static.active
                 ]
 
-                existing_capacity = c.df.loc[existing_index, attr + "_nom"].sum()
+                existing_capacity = c.static.loc[existing_index, attr + "_nom"].sum()
 
                 logger.info(
                     f"Existing {c.name} {carrier} capacity in {ct}: {existing_capacity} {units}"
@@ -102,60 +104,101 @@ def add_power_limits(n, investment_year, limits_power_max):
     """
     " Restricts the maximum inflow/outflow of electricity from/to a country.
     """
+
+    def add_pos_neg_aux_variables(n, idx, var_name, infix):
+        """
+        For every snapshot in the network `n` this functions adds auxiliary variables corresponding to the positive and negative parts of the dynamical variables of the network components specified in the index `idx`. The `infix` parameter is used to create unique names for the auxiliary variables and constraints.
+
+        Parameters
+        ----------
+        n : pypsa.Network
+            The PyPSA network object containing the model.
+        idx : pandas.Index
+            The index of the network component (e.g., lines or links) for which to create auxiliary variables.
+        infix : str
+            A string used to create unique names for the auxiliary variables and constraints.
+        """
+        var = n.model[var_name].sel({"name": idx})
+        aux_pos = n.model.add_variables(
+            name=f"{var_name}-{infix}-aux-pos",
+            lower=0,
+            coords=[n.snapshots, idx],
+        )
+        aux_neg = n.model.add_variables(
+            name=f"{var_name}-{infix}-aux-neg",
+            upper=0,
+            coords=[n.snapshots, idx],
+        )
+        n.model.add_constraints(
+            aux_pos >= var,
+            name=f"{var_name}-{infix}-aux-pos-constr",
+        )
+        n.model.add_constraints(
+            aux_neg <= var,
+            name=f"{var_name}-{infix}-aux-neg-constr",
+        )
+        return aux_pos, aux_neg
+
     for ct in limits_power_max:
         if investment_year not in limits_power_max[ct].keys():
             continue
 
-        limit = 1e3 * limits_power_max[ct][investment_year] / 10
+        lim = 1e3 * limits_power_max[ct][investment_year]  # in MW
 
         logger.info(
-            f"Adding constraint on electricity import/export from/to {ct} to be < {limit} MW"
+            f"Adding constraint on electricity import/export from/to {ct} to be < {lim} MW"
         )
-        incoming_line = n.lines.index[
-            (n.lines.carrier == "AC")
-            & (n.lines.bus0.str[:2] != ct)
-            & (n.lines.bus1.str[:2] == ct)
-        ]
-        outgoing_line = n.lines.index[
-            (n.lines.carrier == "AC")
-            & (n.lines.bus0.str[:2] == ct)
-            & (n.lines.bus1.str[:2] != ct)
-        ]
+        # identify interconnectors
 
-        incoming_link = n.links.index[
-            (n.links.carrier == "DC")
-            & (n.links.bus0.str[:2] != ct)
-            & (n.links.bus1.str[:2] == ct)
-        ]
-        outgoing_link = n.links.index[
-            (n.links.carrier == "DC")
-            & (n.links.bus0.str[:2] == ct)
-            & (n.links.bus1.str[:2] != ct)
-        ]
+        incoming_lines = n.lines.query(
+            f"not bus0.str.startswith('{ct}') and bus1.str.startswith('{ct}') and active"
+        )
+        outgoing_lines = n.lines.query(
+            f"bus0.str.startswith('{ct}') and not bus1.str.startswith('{ct}') and active"
+        )
+        incoming_links = n.links.query(
+            f"not bus0.str.startswith('{ct}') and bus1.str.startswith('{ct}') and carrier == 'DC' and active"
+        )
+        outgoing_links = n.links.query(
+            f"bus0.str.startswith('{ct}') and not bus1.str.startswith('{ct}') and carrier == 'DC' and active"
+        )
 
-        # iterate over snapshots - otherwise exporting of postnetwork fails since
-        # the constraints are time dependent
-        for t in n.snapshots:
-            incoming_line_p = n.model["Line-s"].loc[t, incoming_line]
-            outgoing_line_p = n.model["Line-s"].loc[t, outgoing_line]
-            incoming_link_p = n.model["Link-p"].loc[t, incoming_link]
-            outgoing_link_p = n.model["Link-p"].loc[t, outgoing_link]
+        # define auxiliary variables for positive and negative parts of line and link flows
 
-            lhs = (
-                incoming_link_p.sum()
-                - outgoing_link_p.sum()
-                + incoming_line_p.sum()
-                - outgoing_line_p.sum()
-            ) / 10
-            # divide by 10 to avoid numerical issues
+        incoming_lines_aux_pos, incoming_lines_aux_neg = add_pos_neg_aux_variables(
+            n, incoming_lines.index, "Line-s", f"incoming-{ct}"
+        )
 
-            cname_upper = f"Power-import-limit-{ct}-{t}"
-            cname_lower = f"Power-export-limit-{ct}-{t}"
+        outgoing_lines_aux_pos, outgoing_lines_aux_neg = add_pos_neg_aux_variables(
+            n, outgoing_lines.index, "Line-s", f"outgoing-{ct}"
+        )
 
-            n.model.add_constraints(lhs <= limit, name=cname_upper)
-            n.model.add_constraints(lhs >= -limit, name=cname_lower)
+        incoming_links_aux_pos, incoming_links_aux_neg = add_pos_neg_aux_variables(
+            n, incoming_links.index, "Link-p", f"incoming-{ct}"
+        )
 
-            # not adding to network as the shadow prices are not needed
+        outgoing_links_aux_pos, outgoing_links_aux_neg = add_pos_neg_aux_variables(
+            n, outgoing_links.index, "Link-p", f"outgoing-{ct}"
+        )
+        # To constraint the absolute values of imports and exports, we have to sum the
+        # corresponding positive and negative flows separately, using the auxiliary variables
+
+        import_lhs = (
+            incoming_links_aux_pos
+            + incoming_lines_aux_pos
+            - outgoing_links_aux_neg
+            - outgoing_lines_aux_neg
+        ).sum(dim="name") / 10
+
+        export_lhs = (
+            outgoing_links_aux_pos
+            + outgoing_lines_aux_pos
+            - incoming_links_aux_neg
+            - incoming_lines_aux_neg
+        ).sum(dim="name") / 10
+
+        n.model.add_constraints(import_lhs <= lim / 10, name=f"Power-import-limit-{ct}")
+        n.model.add_constraints(export_lhs <= lim / 10, name=f"Power-export-limit-{ct}")
 
 
 def h2_import_limits(n, investment_year, limits_volume_max):
@@ -373,6 +416,7 @@ def add_national_co2_budgets(n, snakemake, national_co2_budgets, investment_year
     nyears = nhours / 8760
 
     sectors = determine_emission_sectors(n.config["sector"])
+    energy_totals = pd.read_csv(snakemake.input.energy_totals, index_col=[0, 1])
 
     # convert MtCO2 to tCO2
     co2_totals = 1e6 * pd.read_csv(snakemake.input.co2_totals_name, index_col=0)
@@ -397,8 +441,8 @@ def add_national_co2_budgets(n, snakemake, national_co2_budgets, investment_year
             links = n.links.index[
                 (n.links.index.str[:2] == ct)
                 & (n.links[f"bus{port}"] == "co2 atmosphere")
-                & (
-                    n.links.carrier != "kerosene for aviation"
+                & ~n.links.carrier.str.contains(
+                    "shipping|aviation"
                 )  # first exclude aviation to multiply it with a domestic factor later
             ]
 
@@ -422,27 +466,68 @@ def add_national_co2_budgets(n, snakemake, national_co2_budgets, investment_year
             )
 
         # Aviation demand
-        energy_totals = pd.read_csv(snakemake.input.energy_totals, index_col=[0, 1])
         domestic_aviation = energy_totals.loc[
             (ct, snakemake.params.energy_year), "total domestic aviation"
         ]
         international_aviation = energy_totals.loc[
             (ct, snakemake.params.energy_year), "total international aviation"
         ]
-        domestic_factor = domestic_aviation / (
+        domestic_aviation_factor = domestic_aviation / (
             domestic_aviation + international_aviation
         )
         aviation_links = n.links[
             (n.links.index.str[:2] == ct) & (n.links.carrier == "kerosene for aviation")
         ]
-        lhs.append
-        (
-            n.model["Link-p"].loc[:, aviation_links.index]
-            * aviation_links.efficiency2
-            * n.snapshot_weightings.generators
-        ).sum() * domestic_factor
+        lhs.append(
+            (
+                n.model["Link-p"].loc[:, aviation_links.index]
+                * aviation_links.efficiency2
+                * n.snapshot_weightings.generators
+            ).sum()
+            * domestic_aviation_factor
+        )
         logger.info(
-            f"Adding domestic aviation emissions for {ct} with a factor of {domestic_factor}"
+            f"Adding domestic aviation emissions for {ct} with a factor of {domestic_aviation_factor}"
+        )
+
+        # Shipping oil
+        domestic_navigation = energy_totals.loc[
+            (ct, snakemake.params.energy_year), "total domestic navigation"
+        ]
+        international_navigation = energy_totals.loc[
+            (ct, snakemake.params.energy_year), "total international navigation"
+        ]
+        domestic_navigation_factor = domestic_navigation / (
+            domestic_navigation + international_navigation
+        )
+        shipping_links = n.links[
+            (n.links.index.str[:2] == ct) & (n.links.carrier == "shipping oil")
+        ]
+        lhs.append(
+            (
+                n.model["Link-p"].loc[:, shipping_links.index]
+                * shipping_links.efficiency2
+                * n.snapshot_weightings.generators
+            ).sum()
+            * domestic_navigation_factor
+        )
+
+        # Shipping methanol
+        shipping_meoh_links = n.links[
+            (n.links.index.str[:2] == ct) & (n.links.carrier == "shipping methanol")
+        ]
+        if not shipping_meoh_links.empty:  # no shipping methanol in 2025
+            lhs.append(
+                (
+                    n.model["Link-p"].loc[:, shipping_meoh_links.index]
+                    * shipping_meoh_links.efficiency2
+                    * n.snapshot_weightings.generators
+                ).sum()
+                * domestic_navigation_factor
+            )
+
+        logger.info(
+            f"Adding domestic shipping emissions for {ct} with a factor of {domestic_navigation_factor}"
         )
 
         # Adding Efuel imports and exports to constraint
